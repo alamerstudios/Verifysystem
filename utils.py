@@ -122,6 +122,39 @@ def mention_roles(guild: discord.Guild | None, ids: Sequence[int] | None) -> str
     return ", ".join(out)
 
 
+PERM_NAMES = {
+    "view_channel": "Kanal ansehen",
+    "send_messages": "Nachrichten senden",
+    "embed_links": "Links einbetten",
+    "read_message_history": "Verlauf lesen",
+}
+
+
+def channel_problem(
+    guild: discord.Guild | None,
+    channel_id: int | None,
+    label: str,
+    needed: tuple[str, ...] = ("view_channel", "send_messages", "embed_links"),
+) -> str | None:
+    """Prüft, ob der Bot im Kanal alles darf. Gibt eine Warnung oder None zurück."""
+    if guild is None or not channel_id:
+        return None
+    channel = guild.get_channel(int(channel_id))
+    if channel is None:
+        return f"{label}: Kanal `{channel_id}` existiert nicht mehr."
+    me = guild.me
+    if me is None:
+        return None
+    try:
+        perms = channel.permissions_for(me)
+    except Exception:  # noqa: BLE001
+        return None
+    missing = [PERM_NAMES[p] for p in needed if not getattr(perms, p, True)]
+    if missing:
+        return f"{label} ({channel.mention}): mir fehlt " + ", ".join(f"`{m}`" for m in missing)
+    return None
+
+
 def mention_channel(guild: discord.Guild | None, channel_id: int | None) -> str:
     if not channel_id:
         return "*(nicht gesetzt)*"

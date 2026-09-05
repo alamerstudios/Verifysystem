@@ -92,10 +92,10 @@ python bot.py
 | `/verify <member>` | Team-Rollen · Admins | Nutzer manuell verifizieren |
 | `/sync` | Bot-Owner | Slash-Commands neu syncen |
 
-## 🧭 Der `/setup`-Assistent
+## 🧭 `/setup` – zwei Modi
 
-Der Bot fragt Schritt für Schritt ab – **jede Antwort wird sofort gespeichert**,
-du kannst `/setup` jederzeit erneut ausführen und einzelne Punkte ändern:
+**Beim ersten Mal: der Assistent.** Der Bot fragt Schritt für Schritt ab –
+**jede Antwort wird sofort gespeichert**:
 
 1. **Verify-Kanal** – wohin das Embed mit dem Button gepostet wird
 2. **Anfragen-Kanal** – wohin die Verifizierungs-Anfragen gehen (Team-Kanal)
@@ -107,6 +107,18 @@ du kannst `/setup` jederzeit erneut ausführen und einzelne Punkte ändern:
 8. **Bewerbung (optional)** – Formular-Fragen und Checkboxen anlegen/bearbeiten/löschen,
    dazu die Schalter *Auto-Annahme* und *DM an Nutzer*
 9. **Übersicht** → Button **🚀 Embed senden**
+
+**Danach: das Verwaltungs-Menü.** Ist das Setup einmal abgeschlossen, öffnet
+`/setup` **nicht mehr den Assistenten**, sondern direkt ein Bearbeiten-Menü:
+
+* Dropdown **Bereich bearbeiten** → Verify-Kanal, Anfragen-Kanal, Team-Rollen,
+  Rollen +, Rollen −, Auto-Rollen (jeweils mit *Leeren*-Button)
+* 🎨 **Embed bearbeiten** · 🔘 **Button bearbeiten** · 👁️ **Vorschau**
+* 📝 **Formular bearbeiten** · ☑️ **Checkboxen bearbeiten** (hinzufügen / Text ändern / löschen)
+* ⚡ **Auto-Annahme** · ✉️ **DM an Nutzer** umschalten
+* 🚀 **Embed (neu) senden** (ersetzt die alte Nachricht) · 🔄 **Setup neu durchlaufen**
+
+Das Menü zeigt außerdem sofort an, wenn dem Bot in einem der Kanäle Rechte fehlen.
 
 ## 🔄 Ablauf für Nutzer
 
@@ -151,6 +163,7 @@ views/verify.py         Verify-Button, Formular, Checkboxen, Team-Prüfung
 |---------|--------|
 | Slash-Commands fehlen | Bis zu 1 h global – `DEV_GUILD_ID` setzen oder `/sync` |
 | „Kann Rolle nicht vergeben“ | Bot-Rolle nach **oben** ziehen + `Rollen verwalten` erlauben |
+| Embed wird nicht gesendet | Meist fehlt dem Bot im Ziel-Kanal `Kanal ansehen`, `Nachrichten senden` oder `Links einbetten` – das Setup-Menü zeigt den genauen Grund jetzt direkt an |
 | Bot startet nicht (`SUPABASE_DB_URL fehlt`) | Env-Variable in Render prüfen |
 | `SSL`/Verbindungsfehler zu Supabase | Pooler-URL (Port `6543`) verwenden |
 | Keine Auto-Rollen | **SERVER MEMBERS INTENT** im Developer Portal aktivieren |

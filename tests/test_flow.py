@@ -21,7 +21,7 @@ import config  # noqa: E402
 import utils  # noqa: E402
 from views import verify as V  # noqa: E402
 from views.setup_wizard import (  # noqa: E402
-    CheckboxManagerView, FormManagerView, SetupWizard,
+    CheckboxManagerView, FormManagerView, SectionEditView, SetupPanelView, SetupWizard,
 )
 
 SENT: list[str] = []
@@ -159,6 +159,9 @@ class FakeBot:
         self.cache.setdefault(gid, {"fields": [], "checkboxes": []})["config"] = cfg
         return cfg
 
+    async def fetch_channel(self, cid):
+        raise discord.NotFound(SimpleNamespace(status=404, reason=""), "unknown channel")
+
 
 # ------------------------------------------------------- Fake Discord --------
 class FakeRole:
@@ -180,7 +183,8 @@ class FakeChannel:
         self.messages = []
 
     def permissions_for(self, m):
-        return SimpleNamespace(send_messages=True, embed_links=True)
+        return SimpleNamespace(view_channel=True, send_messages=True, embed_links=True,
+                               read_message_history=True)
 
     async def send(self, content=None, embed=None, view=None, allowed_mentions=None):
         msg = FakeMessage(len(self.messages) + 1000, self, embed, view)
@@ -431,12 +435,75 @@ async def main() -> None:
     assert not wizard.missing_required(), wizard.missing_required()
     ia = FakeInteraction(admin, guild, bot)
     await button(wizard, "Embed senden").callback(ia)
+    assert any("gesendet" in s for s in ia.sent), ia.sent
     panel_channel = guild.get_channel(200)
     assert panel_channel.messages, "Panel wurde nicht gesendet"
     panel_msg = panel_channel.messages[-1]
     assert panel_msg.view.children[0].custom_id == config.VERIFY_BUTTON_ID
     print("✔ Panel gesendet:", panel_msg.embeds[0].title,
           "| Button:", panel_msg.view.children[0].label)
+
+    # --- /setup erneut: jetzt Verwaltungs-Menü statt Assistent ---
+    cfg = await bot.get_cfg(guild.id)
+    assert cfg["setup_completed"] is True
+    panel_view = SetupPanelView(bot, guild, admin.id)
+    ia = FakeInteraction(admin, guild, bot)
+    await panel_view.start(ia)
+    labels = [getattr(c, "label", None) for c in panel_view.children]
+    assert "Formular bearbeiten" in labels and "Checkboxen bearbeiten" in labels
+    assert "Embed (neu) senden" in labels and "Setup neu durchlaufen" in labels
+    print("✔ Verwaltungs-Menü:", [x for x in labels if x])
+
+    # Formular aus dem Verwaltungs-Menü bearbeiten
+    ia = FakeInteraction(admin, guild, bot)
+    await button(panel_view, "Formular bearbeiten").callback(ia)
+    fm2 = ia.last_view
+    assert isinstance(fm2, FormManagerView) and fm2.fields
+    fm2.selected = fm2.fields[0]["id"]
+    fm2.rebuild()
+    ia2 = FakeInteraction(admin, guild, bot)
+    await button(fm2, "Bearbeiten").callback(ia2)
+    em = ia2.response.modal
+    em.f_label._value = "Wie alt bist du genau?"
+    em.f_placeholder._value = ""
+    em.f_style._value, em.f_required._value, em.f_max._value = "kurz", "ja", ""
+    await em.on_submit(FakeInteraction(admin, guild, bot))
+    assert (await bot.db.get_form_fields(guild.id))[0]["label"] == "Wie alt bist du genau?"
+    await button(fm2, "Zurück").callback(FakeInteraction(admin, guild, bot))
+    print("✔ Formular über Verwaltungs-Menü bearbeitet")
+
+    # Bereich (Rollen) über das Dropdown ändern
+    section = SectionEditView(panel_view, "add_role_ids")
+    await section.refresh(FakeInteraction(admin, guild, bot))
+    await button(section, "Leeren").callback(FakeInteraction(admin, guild, bot))
+    assert (await bot.get_cfg(guild.id))["add_role_ids"] == []
+    await panel_view.save(add_role_ids=[11])
+    await button(section, "Zurück").callback(FakeInteraction(admin, guild, bot))
+    print("✔ Bereich über Dropdown bearbeitet (leeren + zurück)")
+
+    # Toggles
+    await button(panel_view, "DM an Nutzer").callback(FakeInteraction(admin, guild, bot))
+    assert (await bot.get_cfg(guild.id))["dm_user"] is False
+    await button(panel_view, "DM an Nutzer").callback(FakeInteraction(admin, guild, bot))
+    assert (await bot.get_cfg(guild.id))["dm_user"] is True
+    print("✔ Schalter im Verwaltungs-Menü funktionieren")
+
+    # Erneut senden -> alte Nachricht wird ersetzt
+    before = len(panel_channel.messages)
+    ia = FakeInteraction(admin, guild, bot)
+    await button(panel_view, "Embed (neu) senden").callback(ia)
+    assert len(panel_channel.messages) == before, "alte Panel-Nachricht nicht ersetzt"
+    assert any("gesendet" in s for s in ia.sent), ia.sent
+    panel_msg = panel_channel.messages[-1]
+    print("✔ Panel neu gesendet & altes ersetzt")
+
+    # Fehlerfall: Kanal gelöscht -> klare Rückmeldung statt Stille
+    await bot.update_cfg(guild.id, panel_channel_id=99999)
+    ia = FakeInteraction(admin, guild, bot)
+    await button(panel_view, "Embed (neu) senden").callback(ia)
+    assert any("finde ich nicht mehr" in s for s in ia.sent), ia.sent
+    print("✔ Fehlerfall meldet sich:", [s for s in ia.sent if "❌" in s][0][:70], "…")
+    await bot.update_cfg(guild.id, panel_channel_id=200, panel_message_id=panel_msg.id)
 
     # --- Nutzer klickt Verifizieren ---
     await bot.load_guild(guild.id)

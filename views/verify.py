@@ -282,6 +282,11 @@ async def submit_request(
 
     channel_id = cfg.get("requests_channel_id")
     channel = guild.get_channel(int(channel_id)) if channel_id else None
+    if channel is None and channel_id:
+        try:
+            channel = await bot.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            channel = None
     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         await reply(
             f"{utils.NO} Der Kanal für Verifizierungs-Anfragen ist nicht (mehr) konfiguriert. "
@@ -639,6 +644,97 @@ async def start_verification(bot, interaction: discord.Interaction, from_retry: 
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     await submit_request(bot, interaction, [], [])
+
+
+async def send_verify_panel(
+    bot,
+    guild: discord.Guild,
+    cfg: dict[str, Any],
+    channel: discord.abc.GuildChannel | None = None,
+) -> tuple[discord.Message | None, str]:
+    """Sendet das Verify-Embed. Gibt (Nachricht|None, Info-/Fehlertext) zurück.
+
+    Meldet jeden Fehlerfall als lesbaren Text zurück, damit im Setup niemals
+    "einfach nichts" passiert.
+    """
+    target = channel
+    if target is None:
+        channel_id = cfg.get("panel_channel_id")
+        if not channel_id:
+            return None, (
+                f"{utils.NO} Es ist kein **Verify-Kanal** eingestellt. "
+                "Wähle ihn im Setup unter *Verify-Kanal* aus."
+            )
+        target = guild.get_channel(int(channel_id))
+        if target is None:
+            try:
+                target = await bot.fetch_channel(int(channel_id))
+            except discord.HTTPException:
+                target = None
+        if target is None:
+            return None, (
+                f"{utils.NO} Den eingestellten Verify-Kanal (`{channel_id}`) finde ich nicht mehr. "
+                "Bitte wähle im Setup einen neuen Kanal aus."
+            )
+
+    if not isinstance(target, (discord.TextChannel, discord.Thread)):
+        return None, f"{utils.NO} Der Verify-Kanal muss ein normaler Textkanal sein."
+
+    me = guild.me
+    if me is None and bot.user is not None:
+        try:
+            me = await guild.fetch_member(bot.user.id)
+        except discord.HTTPException:
+            me = None
+    if me is not None:
+        perms = target.permissions_for(me)
+        missing = [
+            name for ok, name in (
+                (perms.view_channel, "Kanal ansehen"),
+                (perms.send_messages, "Nachrichten senden"),
+                (perms.embed_links, "Links einbetten"),
+            ) if not ok
+        ]
+        if missing:
+            return None, (
+                f"{utils.NO} Mir fehlen Rechte in {target.mention}: "
+                + ", ".join(f"`{m}`" for m in missing)
+            )
+
+    # Alte Panel-Nachricht entfernen (falls vorhanden)
+    old_id = cfg.get("panel_message_id")
+    if old_id:
+        try:
+            old = await target.fetch_message(int(old_id))
+            await old.delete()
+        except (discord.HTTPException, AttributeError):
+            pass
+
+    try:
+        message = await target.send(
+            embed=utils.build_panel_embed(cfg, guild),
+            view=VerifyPanelView(bot, cfg),
+        )
+    except discord.Forbidden as exc:
+        return None, (
+            f"{utils.NO} Discord hat das Senden in {target.mention} verweigert "
+            f"(keine Berechtigung): `{exc.text or exc}`"
+        )
+    except discord.HTTPException as exc:
+        log.exception("Panel konnte nicht gesendet werden.")
+        return None, f"{utils.NO} Fehler beim Senden: `{exc}`"
+
+    await bot.update_cfg(
+        guild.id,
+        panel_channel_id=target.id,
+        panel_message_id=message.id,
+        setup_completed=True,
+    )
+    await bot.load_guild(guild.id)
+    return message, (
+        f"{utils.OK} Verify-Embed wurde in {target.mention} gesendet: {message.jump_url}\n"
+        "Der Button bleibt dauerhaft gültig – auch nach einem Neustart des Bots."
+    )
 
 
 class VerifyPanelView(discord.ui.View):

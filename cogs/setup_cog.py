@@ -9,8 +9,8 @@ from discord.ext import commands
 
 import config
 import utils
-from views.setup_wizard import SetupWizard
-from views.verify import VerifyPanelView
+from views.setup_wizard import SetupPanelView, SetupWizard
+from views.verify import send_verify_panel
 
 log = logging.getLogger("verifybot.commands")
 
@@ -38,11 +38,12 @@ class SetupCog(commands.Cog):
             return
 
         cfg = await self.bot.get_cfg(interaction.guild.id)
-        wizard = SetupWizard(
-            self.bot, interaction.guild, interaction.user.id,
-            step=(9 if cfg.get("setup_completed") else 0),
-        )
-        await wizard.start(interaction)
+        if cfg.get("setup_completed"):
+            # Setup ist schon durch -> direkt das Verwaltungs-Menü zum Bearbeiten
+            view = SetupPanelView(self.bot, interaction.guild, interaction.user.id)
+        else:
+            view = SetupWizard(self.bot, interaction.guild, interaction.user.id, step=0)
+        await view.start(interaction)
 
     # ------------------------------------------------------------ /verify-panel
     @app_commands.command(
@@ -63,21 +64,8 @@ class SetupCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
         cfg = await self.bot.get_cfg(guild.id)
-        target = channel or guild.get_channel(int(cfg.get("panel_channel_id") or 0))
-        if not isinstance(target, discord.TextChannel):
-            await utils.safe_respond(
-                interaction, f"{utils.NO} Kein gültiger Kanal – führe zuerst `/setup` aus."
-            )
-            return
-
-        message = await target.send(
-            embed=utils.build_panel_embed(cfg, guild), view=VerifyPanelView(self.bot, cfg)
-        )
-        await self.bot.update_cfg(
-            guild.id, panel_channel_id=target.id, panel_message_id=message.id,
-            setup_completed=True,
-        )
-        await utils.safe_respond(interaction, f"{utils.OK} Gesendet: {message.jump_url}")
+        _message, info = await send_verify_panel(self.bot, guild, cfg, channel)
+        await utils.safe_respond(interaction, info)
 
     # ----------------------------------------------------------- /verify-config
     @app_commands.command(
