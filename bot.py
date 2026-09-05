@@ -10,7 +10,7 @@ from typing import Any
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 import utils
@@ -96,6 +96,19 @@ class VerifyBot(commands.Bot):
 
         self.tree.on_error = self.on_app_command_error  # type: ignore[assignment]
 
+    @tasks.loop(minutes=5)
+    async def refresh_cache(self) -> None:
+        """Haelt Formular/Checkboxen aktuell, falls ein Update mal nicht ankam."""
+        for guild in list(self.guilds):
+            try:
+                await self.load_guild(guild.id)
+            except Exception:  # noqa: BLE001
+                log.warning("Cache-Refresh fuer Guild %s fehlgeschlagen.", guild.id)
+
+    @refresh_cache.before_loop
+    async def _before_refresh(self) -> None:
+        await self.wait_until_ready()
+
     async def on_ready(self) -> None:
         log.info("Eingeloggt als %s (ID: %s)", self.user, self.user.id if self.user else "?")
         log.info("Aktiv auf %s Server(n).", len(self.guilds))
@@ -106,6 +119,9 @@ class VerifyBot(commands.Bot):
                 await self.load_guild(guild.id)
             except Exception:  # noqa: BLE001
                 log.exception("Cache für Guild %s fehlgeschlagen.", guild.id)
+
+        if not self.refresh_cache.is_running():
+            self.refresh_cache.start()
 
         await self.change_presence(
             activity=discord.Activity(type=discord.ActivityType.watching, name="/setup")

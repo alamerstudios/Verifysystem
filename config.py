@@ -33,7 +33,7 @@ DATABASE_URL: str | None = _clean(
 
 # ---------------------------------------------------------------- Limits -----
 MAX_FORM_FIELDS = 5      # Discord-Limit: 5 Eingabefelder pro Modal
-MAX_CHECKBOXES = 20      # 4 Button-Reihen a 5 Buttons (5. Reihe = Absenden)
+MAX_CHECKBOXES = 20      # Discord: max. 10 Pflicht- + 10 optionale Checkboxen im Modal
 
 # --------------------------------------------------------------- Defaults ----
 DEFAULT_EMBED_TITLE = "🔐 Verifizierung"

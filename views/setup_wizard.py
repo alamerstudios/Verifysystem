@@ -66,7 +66,7 @@ SECTIONS: dict[str, tuple[str, str, str, str]] = {
 class BaseSetupView(discord.ui.View):
     """Gemeinsame Logik von Assistent, Verwaltungs-Menü und Unter-Menüs."""
 
-    def __init__(self, bot, guild: discord.Guild, author_id: int, timeout: float = 1200):
+    def __init__(self, bot, guild: discord.Guild, author_id: int, timeout: float = 840):
         super().__init__(timeout=timeout)
         self.bot = bot
         self.guild = guild
@@ -85,10 +85,16 @@ class BaseSetupView(discord.ui.View):
         return True
 
     async def on_timeout(self) -> None:
+        # Nach 15 Min. akzeptiert Discord keine Interaktionen mehr auf dieser
+        # Nachricht -> Buttons deaktivieren, damit niemand ins Leere klickt.
+        for item in self.children:
+            if hasattr(item, "disabled"):
+                item.disabled = True  # type: ignore[attr-defined]
         if self.message is not None:
             try:
                 await self.message.edit(
-                    content="⌛ Setup-Menü abgelaufen – führe `/setup` erneut aus.", view=None
+                    content="⌛ Setup-Menü abgelaufen – führe `/setup` erneut aus.",
+                    view=self,
                 )
             except discord.HTTPException:
                 pass
@@ -372,7 +378,7 @@ class CheckboxModal(discord.ui.Modal):
 # ==================================================== Manager (Formular) =====
 class FormManagerView(discord.ui.View):
     def __init__(self, parent: BaseSetupView):
-        super().__init__(timeout=900)
+        super().__init__(timeout=840)
         self.parent = parent
         self.selected: int | None = None
         self.fields: list[dict[str, Any]] = []
@@ -495,7 +501,7 @@ class FormManagerView(discord.ui.View):
 # =================================================== Manager (Checkboxen) ====
 class CheckboxManagerView(discord.ui.View):
     def __init__(self, parent: BaseSetupView):
-        super().__init__(timeout=900)
+        super().__init__(timeout=840)
         self.parent = parent
         self.selected: int | None = None
         self.boxes: list[dict[str, Any]] = []
@@ -524,7 +530,7 @@ class CheckboxManagerView(discord.ui.View):
             ),
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text=f"{len(self.boxes)}/{config.MAX_CHECKBOXES} Checkboxen")
+        embed.set_footer(text=f"{len(self.boxes)}/{config.MAX_CHECKBOXES} Checkboxen • erscheinen direkt im Formular (max. 10 Pflicht + 10 optional)")
         return embed
 
     def rebuild(self) -> None:
@@ -615,7 +621,7 @@ class SectionEditView(discord.ui.View):
     """Kleines Unter-Menü, um genau einen Kanal/eine Rollen-Liste zu ändern."""
 
     def __init__(self, parent: BaseSetupView, key: str):
-        super().__init__(timeout=900)
+        super().__init__(timeout=840)
         self.parent = parent
         self.key = key
         self.name, self.kind, self.emoji, self.info = SECTIONS[key]

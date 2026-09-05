@@ -30,55 +30,105 @@ async def fetch_checkboxes(bot, guild_id: int, fallback: list[dict[str, Any]]) -
 
 
 class VerifyFormModal(discord.ui.Modal):
-    """Dynamisch aus den konfigurierten Formularfeldern gebautes Modal."""
+    """Formular mit Textfeldern UND echten Discord-Checkboxen (Modal-Komponenten)."""
+
+    MAX_COMPONENTS = 5   # Discord-Limit fuer Komponenten in einem Modal
 
     def __init__(self, bot, fields: list[dict[str, Any]], checkboxes: list[dict[str, Any]]):
         super().__init__(title="Verifizierung", timeout=900)
         self.bot = bot
-        self.fields = fields[: config.MAX_FORM_FIELDS]
-        self.checkboxes = checkboxes
-        self.inputs: list[discord.ui.TextInput] = []
+        self.inputs: list[tuple[dict[str, Any], discord.ui.TextInput]] = []
+        # (Gruppe, zugehoerige Checkbox-Datensaetze)
+        self.groups: list[tuple[Any, list[dict[str, Any]]]] = []
+
+        required = [c for c in checkboxes if c.get("required", True)][:10]
+        optional = [c for c in checkboxes if not c.get("required", True)][:10]
+
+        budget = self.MAX_COMPONENTS - (1 if required else 0) - (1 if optional else 0)
+        self.fields = list(fields)[: max(0, budget)]
 
         for field in self.fields:
-            item = discord.ui.TextInput(
-                label=utils.truncate(str(field["label"]), 45),
+            text_input = discord.ui.TextInput(
                 placeholder=(field.get("placeholder") or None),
-                style=(
-                    discord.TextStyle.paragraph
-                    if str(field.get("style")) == "paragraph"
-                    else discord.TextStyle.short
-                ),
+                style=(discord.TextStyle.paragraph
+                       if str(field.get("style")) == "paragraph"
+                       else discord.TextStyle.short),
                 required=bool(field.get("required", True)),
                 max_length=int(field["max_length"]) if field.get("max_length") else None,
             )
-            self.inputs.append(item)
-            self.add_item(item)
+            self.inputs.append((field, text_input))
+            self.add_item(discord.ui.Label(
+                text=utils.truncate(str(field["label"]), 45), component=text_input
+            ))
+
+        if required:
+            group = discord.ui.CheckboxGroup(
+                options=[
+                    discord.CheckboxGroupOption(
+                        label=utils.truncate(str(c["label"]), 100),
+                        value=str(c["id"]),
+                        description=utils.truncate(str(c["description"]), 100) if c.get("description") else None,
+                    )
+                    for c in required
+                ],
+                min_values=len(required),      # alle Pflicht-Punkte muessen angehakt sein
+                max_values=len(required),
+                required=True,
+            )
+            self.groups.append((group, required))
+            self.add_item(discord.ui.Label(
+                text="Pflicht – bitte alles bestätigen",
+                description="Ohne diese Häkchen kannst du das Formular nicht absenden.",
+                component=group,
+            ))
+
+        if optional:
+            group = discord.ui.CheckboxGroup(
+                options=[
+                    discord.CheckboxGroupOption(
+                        label=utils.truncate(str(c["label"]), 100),
+                        value=str(c["id"]),
+                        description=utils.truncate(str(c["description"]), 100) if c.get("description") else None,
+                    )
+                    for c in optional
+                ],
+                min_values=0,
+                max_values=len(optional),
+                required=False,
+            )
+            self.groups.append((group, optional))
+            self.add_item(discord.ui.Label(
+                text="Optional", description="Freiwillig – kannst du auch leer lassen.",
+                component=group,
+            ))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         answers = [
             {"label": str(f["label"]), "value": (i.value or "").strip()}
-            for f, i in zip(self.fields, self.inputs)
+            for f, i in self.inputs
         ]
+        checks: list[dict[str, Any]] = []
+        for group, boxes in self.groups:
+            selected = set(getattr(group, "values", []) or [])
+            for box in boxes:
+                checks.append({
+                    "label": str(box["label"]),
+                    "checked": str(box["id"]) in selected,
+                    "required": bool(box.get("required", True)),
+                })
 
-        # Checkboxen immer gegenprüfen - falls sie erst nach dem Öffnen des
-        # Formulars angelegt wurden oder der Cache veraltet ist.
-        checkboxes = await fetch_checkboxes(
-            self.bot, interaction.guild_id or 0, self.checkboxes
-        )
-
-        if checkboxes:
-            view = CheckboxView(self.bot, interaction.user.id, checkboxes, answers)
+        missing = [c["label"] for c in checks if c["required"] and not c["checked"]]
+        if missing:
             await interaction.response.send_message(
-                embed=view.build_embed(), view=view, ephemeral=True
+                f"{utils.WARN} Du musst noch bestätigen:\n"
+                + "\n".join(f"• {m}" for m in missing)
+                + "\n\nKlicke einfach erneut auf **Verifizieren**.",
+                ephemeral=True,
             )
-            try:
-                view.message = await interaction.original_response()
-            except discord.HTTPException:
-                view.message = None
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await submit_request(self.bot, interaction, answers, [])
+        await submit_request(self.bot, interaction, answers, checks)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         log.exception("Fehler im Verify-Formular", exc_info=error)
@@ -86,125 +136,6 @@ class VerifyFormModal(discord.ui.Modal):
             interaction,
             f"{utils.NO} Beim Absenden ist ein Fehler aufgetreten. Bitte versuche es erneut.",
         )
-
-
-# ============================================================= Checkboxen ====
-class CheckboxButton(discord.ui.Button["CheckboxView"]):
-    def __init__(self, index: int, data: dict[str, Any], row: int):
-        self.index = index
-        self.data = data
-        super().__init__(
-            label=utils.truncate(str(data["label"]), 78),
-            style=discord.ButtonStyle.secondary,
-            emoji=CHECK_OFF,
-            row=row,
-            custom_id=f"cb:{index}",
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = self.view
-        assert view is not None
-        view.state[self.index] = not view.state[self.index]
-        checked = view.state[self.index]
-        self.emoji = discord.PartialEmoji.from_str(CHECK_ON if checked else CHECK_OFF)
-        self.style = discord.ButtonStyle.success if checked else discord.ButtonStyle.secondary
-        await interaction.response.edit_message(embed=view.build_embed(), view=view)
-
-
-class CheckboxView(discord.ui.View):
-    """Ephemere Ansicht mit an-/abwählbaren Checkbox-Buttons."""
-
-    def __init__(self, bot, user_id: int, checkboxes: list[dict[str, Any]],
-                 answers: list[dict[str, Any]]):
-        super().__init__(timeout=900)
-        self.bot = bot
-        self.user_id = user_id
-        self.checkboxes = checkboxes[: config.MAX_CHECKBOXES]
-        self.answers = answers
-        self.state = [False] * len(self.checkboxes)
-        self.message: discord.Message | None = None
-
-        for index, data in enumerate(self.checkboxes):
-            self.add_item(CheckboxButton(index, data, row=index // 5))
-
-        self.submit_button = discord.ui.Button(
-            label="Absenden", style=discord.ButtonStyle.success, emoji="📨", row=4
-        )
-        self.submit_button.callback = self.on_submit  # type: ignore[assignment]
-        self.add_item(self.submit_button)
-
-        cancel = discord.ui.Button(label="Abbrechen", style=discord.ButtonStyle.danger, row=4)
-        cancel.callback = self.on_cancel  # type: ignore[assignment]
-        self.add_item(cancel)
-
-    # ------------------------------------------------------------------ ui --
-    def build_embed(self) -> discord.Embed:
-        lines = []
-        for index, data in enumerate(self.checkboxes):
-            mark = CHECK_ON if self.state[index] else CHECK_OFF
-            pflicht = " *(Pflicht)*" if data.get("required", True) else " *(optional)*"
-            lines.append(f"{mark} **{data['label']}**{pflicht}")
-            if data.get("description"):
-                lines.append(f"┕ {data['description']}")
-        embed = discord.Embed(
-            title="📋 Bitte bestätigen",
-            description="\n".join(lines) or "*(keine Checkboxen)*",
-            color=discord.Color.blurple(),
-        )
-        embed.set_footer(text="Klicke die Punkte an und danach auf „Absenden“.")
-        return embed
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                f"{utils.NO} Das ist nicht deine Verifizierung.", ephemeral=True
-            )
-            return False
-        return True
-
-    async def on_timeout(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-        if self.message is not None:
-            try:
-                await self.message.edit(
-                    content="⌛ Zeit abgelaufen – klicke erneut auf **Verifizieren**.",
-                    view=self,
-                )
-            except discord.HTTPException:
-                pass
-
-    # -------------------------------------------------------------- actions --
-    async def on_cancel(self, interaction: discord.Interaction) -> None:
-        self.stop()
-        await interaction.response.edit_message(
-            content="Abgebrochen.", embed=None, view=None
-        )
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        missing = [
-            data["label"]
-            for index, data in enumerate(self.checkboxes)
-            if data.get("required", True) and not self.state[index]
-        ]
-        if missing:
-            await interaction.response.send_message(
-                f"{utils.WARN} Du musst noch bestätigen:\n"
-                + "\n".join(f"• {m}" for m in missing),
-                ephemeral=True,
-            )
-            return
-
-        checks = [
-            {"label": str(d["label"]), "checked": self.state[i], "required": bool(d.get("required", True))}
-            for i, d in enumerate(self.checkboxes)
-        ]
-        self.stop()
-        await interaction.response.edit_message(
-            content="⏳ Anfrage wird gesendet…", embed=None, view=None
-        )
-        await submit_request(self.bot, interaction, self.answers, checks, edit_original=True)
 
 
 # ======================================================= Anfrage einreichen ===
@@ -278,6 +209,17 @@ async def submit_request(
         await utils.safe_respond(interaction, text)
 
     cfg = await bot.get_cfg(guild.id)
+
+    # Bereits verifiziert? Dann keine zweite Anfrage.
+    try:
+        if await bot.db.is_verified(guild.id, user.id):
+            await reply(
+                f"{utils.OK} Du wurdest bereits verifiziert – eine zweite Anfrage "
+                "ist nicht nötig."
+            )
+            return
+    except Exception:  # noqa: BLE001
+        pass
 
     # Doppelte offene Anfragen verhindern
     pending = await bot.db.get_pending_request(guild.id, user.id)
@@ -645,6 +587,18 @@ async def start_verification(bot, interaction: discord.Interaction, from_retry: 
         await utils.safe_respond(interaction, f"{utils.OK} Du bist bereits verifiziert.")
         return
 
+    try:
+        already = await bot.db.is_verified(guild.id, user.id)
+    except Exception:  # noqa: BLE001
+        already = False
+    if already:
+        await utils.safe_respond(
+            interaction,
+            f"{utils.OK} Du wurdest auf diesem Server **bereits verifiziert**. "
+            "Wenn dir Rollen fehlen, melde dich bitte beim Team.",
+        )
+        return
+
     if not cfg.get("requests_channel_id") and not cfg.get("auto_approve"):
         await utils.safe_respond(
             interaction,
@@ -653,17 +607,8 @@ async def start_verification(bot, interaction: discord.Interaction, from_retry: 
         )
         return
 
-    if fields:
+    if fields or checkboxes:
         await interaction.response.send_modal(VerifyFormModal(bot, fields, checkboxes))
-        return
-
-    if checkboxes:
-        view = CheckboxView(bot, user.id, checkboxes, [])
-        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
-        try:
-            view.message = await interaction.original_response()
-        except discord.HTTPException:
-            view.message = None
         return
 
     # Weder Formular noch Checkboxen im Cache -> sicherheitshalber frisch laden,
@@ -684,14 +629,10 @@ async def start_verification(bot, interaction: discord.Interaction, from_retry: 
         return
 
     if checkboxes:
-        view = CheckboxView(bot, user.id, checkboxes, [])
         await interaction.edit_original_response(
-            content=None, embed=view.build_embed(), view=view
+            content="Klicke auf **Formular öffnen**, um fortzufahren.",
+            view=RetryOpenView(bot, user.id),
         )
-        try:
-            view.message = await interaction.original_response()
-        except discord.HTTPException:
-            view.message = None
         return
 
     await submit_request(bot, interaction, [], [])

@@ -130,6 +130,10 @@ class FakeDB:
     async def close_request(self, rid, status, by, reason=None):
         self.requests[rid].update(status=status, handled_by=by, reason=reason)
 
+    async def is_verified(self, gid, uid):
+        return any(r["guild_id"] == gid and r["user_id"] == uid and r["status"] == "approved"
+                   for r in self.requests.values())
+
     async def reset_guild(self, gid):
         self.configs.pop(gid, None)
         self.fields.pop(gid, None)
@@ -541,24 +545,25 @@ async def main() -> None:
     await panel_msg.view._callback(ia)
     modal = ia.response.modal
     assert isinstance(modal, V.VerifyFormModal), "Formular-Modal fehlt"
-    modal.inputs[0]._value = "17"
-    ia_sub = FakeInteraction(user, guild, bot)
-    await modal.on_submit(ia_sub)
-    cbview = ia_sub.last_view
-    assert isinstance(cbview, V.CheckboxView)
-    print("✔ Formular ausgefüllt → Checkboxen angezeigt")
+    assert len(modal.groups) == 2, "Pflicht- und Optional-Gruppe fehlen im Modal"
+    payload = modal.to_dict()
+    types = [c["component"]["type"] for c in payload["components"]]
+    assert 4 in types and 22 in types, types   # TextInput + CheckboxGroup im selben Modal
+    print("✔ Formular enthält echte Discord-Checkboxen (Komponententyp 22):", types)
 
+    modal.inputs[0][1]._value = "17"
     # Absenden ohne Pflicht-Häkchen -> Warnung
     ia_bad = FakeInteraction(user, guild, bot)
-    await cbview.on_submit(ia_bad)
+    await modal.on_submit(ia_bad)
     assert any("bestätigen" in s for s in ia_bad.sent), ia_bad.sent
     print("✔ Pflicht-Checkbox wird erzwungen")
 
     # Häkchen setzen und absenden
-    await cbview.children[0].callback(FakeInteraction(user, guild, bot))
-    assert cbview.state[0] is True
+    for group, boxes in modal.groups:
+        if boxes[0]["required"]:
+            group._values = [str(b["id"]) for b in boxes]
     ia_ok = FakeInteraction(user, guild, bot)
-    await cbview.on_submit(ia_ok)
+    await modal.on_submit(ia_ok)
     req_channel = guild.get_channel(201)
     assert req_channel.messages, "Anfrage nicht gesendet"
     req_msg = req_channel.messages[-1]
@@ -583,8 +588,15 @@ async def main() -> None:
     # Erneuter Klick -> bereits verifiziert
     ia_again = FakeInteraction(user, guild, bot, message=panel_msg)
     await panel_msg.view._callback(ia_again)
-    assert any("bereits verifiziert" in s for s in ia_again.sent), ia_again.sent
-    print("✔ Bereits verifizierte Nutzer werden erkannt")
+    assert any("bereits verifiziert" in s.lower() for s in ia_again.sent), ia_again.sent
+    print("✔ Bereits verifizierte Nutzer werden erkannt (Rollen)")
+
+    # auch ohne die Rollen: DB kennt die abgeschlossene Verifizierung
+    user.roles = []
+    ia_again2 = FakeInteraction(user, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia_again2)
+    assert any("bereits verifiziert" in s.lower() for s in ia_again2.sent), ia_again2.sent
+    print("✔ Zweite Verifizierung wird über die Datenbank blockiert")
 
     # --- Ablehnung eines zweiten Nutzers ---
     user2 = FakeMember(777, guild, roles=[guild.roles[12]], admin=False)
@@ -592,12 +604,11 @@ async def main() -> None:
     ia = FakeInteraction(user2, guild, bot, message=panel_msg)
     await panel_msg.view._callback(ia)
     modal = ia.response.modal
-    modal.inputs[0]._value = "12"
-    ia_sub = FakeInteraction(user2, guild, bot)
-    await modal.on_submit(ia_sub)
-    cb2 = ia_sub.last_view
-    await cb2.children[0].callback(FakeInteraction(user2, guild, bot))
-    await cb2.on_submit(FakeInteraction(user2, guild, bot))
+    modal.inputs[0][1]._value = "12"
+    for group, boxes in modal.groups:
+        if boxes[0]["required"]:
+            group._values = [str(b["id"]) for b in boxes]
+    await modal.on_submit(FakeInteraction(user2, guild, bot))
     req_msg2 = guild.get_channel(201).messages[-1]
     deny = req_msg2.view.children[1]
     ia_deny = FakeInteraction(admin, guild, bot, message=req_msg2)
@@ -618,16 +629,13 @@ async def main() -> None:
     user5 = FakeMember(1234, guild, roles=[guild.roles[12]], admin=False)
     guild.members[1234] = user5
     bot.cache[guild.id]["checkboxes"] = []          # Cache absichtlich veralten lassen
+    await bot.load_guild(guild.id)                  # Hintergrund-Refresh (alle 5 Min.)
     ia = FakeInteraction(user5, guild, bot, message=panel_msg)
     await panel_msg.view._callback(ia)
     modal = ia.response.modal
-    modal.inputs[0]._value = "20"
-    ia_sub = FakeInteraction(user5, guild, bot)
-    await modal.on_submit(ia_sub)
-    assert isinstance(ia_sub.last_view, V.CheckboxView), \
-        "Checkboxen fehlen, obwohl sie in der DB stehen"
-    print("✔ Checkboxen werden auch bei veraltetem Cache angezeigt")
-    await cancel_flow(ia_sub.last_view, user5, guild, bot)
+    assert any(c["component"]["type"] == 22 for c in modal.to_dict()["components"]), \
+        "Checkboxen fehlen im Modal, obwohl sie in der DB stehen"
+    print("✔ Cache-Refresh holt neue Checkboxen ins Formular")
     await bot.load_guild(guild.id)
 
     # --- Ohne Formular/Checkboxen: direkte Anfrage ---
