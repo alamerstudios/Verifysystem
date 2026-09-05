@@ -124,10 +124,9 @@ Das Menü zeigt außerdem sofort an, wenn dem Bot in einem der Kanäle Rechte fe
 ## 🔄 Ablauf für Nutzer
 
 ```
-[Verifizieren]  ──►  Formular (bis zu 5 Fragen, Popup)
-                     └►  Checkboxen (anklickbar, Pflicht/optional)
-                          └►  Anfrage im Team-Kanal  ──►  [✅ Annehmen] / [❌ Ablehnen (+Grund)]
-                                                            └►  Rollen +/−, DM an den Nutzer
+[Verifizieren] ──► EIN Formular-Popup: Textfragen + Checkboxen (Pflicht & optional)
+                    └► Anfrage im Team-Kanal ──► [✅ Annehmen] / [❌ Ablehnen (+Grund)]
+                                                  └► Rollen +/−, DM an den Nutzer
 ```
 
 * Sind **keine** Fragen/Checkboxen angelegt, geht die Anfrage direkt raus.
@@ -164,7 +163,8 @@ views/verify.py         Verify-Button, Formular, Checkboxen, Team-Prüfung
 |---------|--------|
 | Slash-Commands fehlen | Bis zu 1 h global – `DEV_GUILD_ID` setzen oder `/sync` |
 | „Kann Rolle nicht vergeben“ | Bot-Rolle nach **oben** ziehen + `Rollen verwalten` erlauben |
-| Checkboxen erscheinen nicht nach dem Formular | Behoben – die Checkboxen werden beim Absenden immer frisch aus der DB geprüft |
+| Checkboxen fehlen im Formular | Sie sind jetzt echte Modal-Komponenten (Discord-Checkbox-Gruppen) – benötigt discord.py ≥ 2.7 |
+| Nutzer verifiziert sich doppelt | Wird blockiert: offene Anfrage, vorhandene Rollen **und** abgeschlossene Verifizierung werden geprüft |
 | Embed wird nicht gesendet | Meist fehlt dem Bot im Ziel-Kanal `Kanal ansehen`, `Nachrichten senden` oder `Links einbetten` – das Setup-Menü zeigt den genauen Grund jetzt direkt an |
 | Bot startet nicht (`SUPABASE_DB_URL fehlt`) | Env-Variable in Render prüfen |
 | `SSL`/Verbindungsfehler zu Supabase | Pooler-URL (Port `6543`) verwenden |
