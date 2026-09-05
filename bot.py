@@ -64,7 +64,11 @@ class VerifyBot(commands.Bot):
 
     async def update_cfg(self, guild_id: int, **values: Any) -> dict[str, Any]:
         cfg = await self.db.update_config(guild_id, **values)
-        data = self.cache.setdefault(guild_id, {"fields": [], "checkboxes": []})
+        data = self.cache.get(guild_id)
+        if data is None:
+            # Cache-Eintrag fehlt -> komplett laden, sonst waeren Formular und
+            # Checkboxen faelschlicherweise leer.
+            data = await self.load_guild(guild_id)
         data["config"] = cfg
         return cfg
 

@@ -1,6 +1,7 @@
 """Alles rund um den Verifizieren-Button, Formular, Checkboxen und die Team-Prüfung."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -17,6 +18,17 @@ CHECK_OFF = "⬜"
 
 
 # ============================================================== Formular ======
+async def fetch_checkboxes(bot, guild_id: int, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Holt die Checkboxen notfalls frisch aus der DB (gegen veralteten Cache)."""
+    if fallback:
+        return fallback
+    try:
+        return await asyncio.wait_for(bot.db.get_checkboxes(guild_id), timeout=1.5)
+    except Exception:  # noqa: BLE001 - Timeout/DB-Fehler -> mit dem arbeiten, was da ist
+        log.warning("Checkboxen konnten nicht nachgeladen werden (Guild %s).", guild_id)
+        return fallback
+
+
 class VerifyFormModal(discord.ui.Modal):
     """Dynamisch aus den konfigurierten Formularfeldern gebautes Modal."""
 
@@ -48,12 +60,21 @@ class VerifyFormModal(discord.ui.Modal):
             for f, i in zip(self.fields, self.inputs)
         ]
 
-        if self.checkboxes:
-            view = CheckboxView(self.bot, interaction.user.id, self.checkboxes, answers)
+        # Checkboxen immer gegenprüfen - falls sie erst nach dem Öffnen des
+        # Formulars angelegt wurden oder der Cache veraltet ist.
+        checkboxes = await fetch_checkboxes(
+            self.bot, interaction.guild_id or 0, self.checkboxes
+        )
+
+        if checkboxes:
+            view = CheckboxView(self.bot, interaction.user.id, checkboxes, answers)
             await interaction.response.send_message(
                 embed=view.build_embed(), view=view, ephemeral=True
             )
-            view.message = await interaction.original_response()
+            try:
+                view.message = await interaction.original_response()
+            except discord.HTTPException:
+                view.message = None
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -639,10 +660,40 @@ async def start_verification(bot, interaction: discord.Interaction, from_retry: 
     if checkboxes:
         view = CheckboxView(bot, user.id, checkboxes, [])
         await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
-        view.message = await interaction.original_response()
+        try:
+            view.message = await interaction.original_response()
+        except discord.HTTPException:
+            view.message = None
         return
 
+    # Weder Formular noch Checkboxen im Cache -> sicherheitshalber frisch laden,
+    # bevor die Anfrage ohne Fragen rausgeht.
     await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        fresh = await bot.load_guild(guild.id)
+        fields, checkboxes = fresh["fields"], fresh["checkboxes"]
+    except Exception:  # noqa: BLE001
+        log.exception("Nachladen der Verify-Daten fehlgeschlagen.")
+        fields, checkboxes = [], []
+
+    if fields:
+        await interaction.edit_original_response(
+            content="Klicke auf **Formular öffnen**, um fortzufahren.",
+            view=RetryOpenView(bot, user.id),
+        )
+        return
+
+    if checkboxes:
+        view = CheckboxView(bot, user.id, checkboxes, [])
+        await interaction.edit_original_response(
+            content=None, embed=view.build_embed(), view=view
+        )
+        try:
+            view.message = await interaction.original_response()
+        except discord.HTTPException:
+            view.message = None
+        return
+
     await submit_request(bot, interaction, [], [])
 
 
@@ -701,20 +752,56 @@ async def send_verify_panel(
                 + ", ".join(f"`{m}`" for m in missing)
             )
 
-    # Alte Panel-Nachricht entfernen (falls vorhanden)
+    # Alte/vorhandene Panel-Nachricht behandeln
+    embed = utils.build_panel_embed(cfg, guild)
+    view = VerifyPanelView(bot, cfg)
     old_id = cfg.get("panel_message_id")
-    if old_id:
-        try:
-            old = await target.fetch_message(int(old_id))
-            await old.delete()
-        except (discord.HTTPException, AttributeError):
-            pass
+    # Wo liegt die alte Nachricht wirklich? (Der Ziel-Kanal kann inzwischen
+    # geaendert worden sein.)
+    old_channel_id = cfg.get("panel_message_channel_id") or cfg.get("panel_channel_id")
 
-    try:
-        message = await target.send(
-            embed=utils.build_panel_embed(cfg, guild),
-            view=VerifyPanelView(bot, cfg),
+    # 1) Existiert das Embed schon im selben Kanal? -> einfach bearbeiten
+    if old_id and old_channel_id and int(old_channel_id) == target.id:
+        existing = None
+        try:
+            existing = await target.fetch_message(int(old_id))
+        except (discord.HTTPException, AttributeError):
+            existing = None
+        own = (
+            existing is not None
+            and bot.user is not None
+            and getattr(getattr(existing, "author", None), "id", None) == bot.user.id
         )
+        if existing is not None and own:
+            try:
+                await existing.edit(content=None, embed=embed, view=view)
+            except discord.HTTPException:
+                log.warning("Panel konnte nicht bearbeitet werden – sende neu.")
+            else:
+                await bot.update_cfg(
+                    guild.id, panel_channel_id=target.id,
+                    panel_message_id=existing.id, panel_message_channel_id=target.id,
+                    setup_completed=True,
+                )
+                await bot.load_guild(guild.id)
+                return existing, (
+                    f"{utils.OK} Das vorhandene Verify-Embed in {target.mention} wurde "
+                    f"**aktualisiert**: {existing.jump_url}"
+                )
+
+    # 2) Panel lag in einem anderen Kanal -> dort aufräumen
+    if old_id and old_channel_id and int(old_channel_id) != target.id:
+        old_channel = guild.get_channel(int(old_channel_id))
+        if isinstance(old_channel, (discord.TextChannel, discord.Thread)):
+            try:
+                old = await old_channel.fetch_message(int(old_id))
+                await old.delete()
+            except (discord.HTTPException, AttributeError):
+                pass
+
+    # 3) Neu senden
+    try:
+        message = await target.send(embed=embed, view=view)
     except discord.Forbidden as exc:
         return None, (
             f"{utils.NO} Discord hat das Senden in {target.mention} verweigert "
@@ -728,6 +815,7 @@ async def send_verify_panel(
         guild.id,
         panel_channel_id=target.id,
         panel_message_id=message.id,
+        panel_message_channel_id=target.id,
         setup_completed=True,
     )
     await bot.load_guild(guild.id)

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS guild_configs (
     auto_approve        BOOLEAN NOT NULL DEFAULT FALSE,
     dm_user             BOOLEAN NOT NULL DEFAULT TRUE,
     panel_message_id    BIGINT,
+    panel_message_channel_id BIGINT,
     setup_completed     BOOLEAN NOT NULL DEFAULT FALSE,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -144,6 +145,7 @@ class Database:
                 ("button_emoji", "TEXT"),
                 ("auto_approve", "BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("dm_user", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("panel_message_channel_id", "BIGINT"),
             ):
                 await conn.execute(
                     f"ALTER TABLE guild_configs ADD COLUMN IF NOT EXISTS {column} {ddl}"

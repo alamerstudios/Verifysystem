@@ -116,7 +116,8 @@ python bot.py
 * 🎨 **Embed bearbeiten** · 🔘 **Button bearbeiten** · 👁️ **Vorschau**
 * 📝 **Formular bearbeiten** · ☑️ **Checkboxen bearbeiten** (hinzufügen / Text ändern / löschen)
 * ⚡ **Auto-Annahme** · ✉️ **DM an Nutzer** umschalten
-* 🚀 **Embed (neu) senden** (ersetzt die alte Nachricht) · 🔄 **Setup neu durchlaufen**
+* 🚀 **Embed senden** – postet die Verify-Nachricht; ist sie schon da, wird sie
+  **bearbeitet** statt neu gepostet (Kanalwechsel: altes Embed wird entfernt)
 
 Das Menü zeigt außerdem sofort an, wenn dem Bot in einem der Kanäle Rechte fehlen.
 
@@ -163,6 +164,7 @@ views/verify.py         Verify-Button, Formular, Checkboxen, Team-Prüfung
 |---------|--------|
 | Slash-Commands fehlen | Bis zu 1 h global – `DEV_GUILD_ID` setzen oder `/sync` |
 | „Kann Rolle nicht vergeben“ | Bot-Rolle nach **oben** ziehen + `Rollen verwalten` erlauben |
+| Checkboxen erscheinen nicht nach dem Formular | Behoben – die Checkboxen werden beim Absenden immer frisch aus der DB geprüft |
 | Embed wird nicht gesendet | Meist fehlt dem Bot im Ziel-Kanal `Kanal ansehen`, `Nachrichten senden` oder `Links einbetten` – das Setup-Menü zeigt den genauen Grund jetzt direkt an |
 | Bot startet nicht (`SUPABASE_DB_URL fehlt`) | Env-Variable in Render prüfen |
 | `SSL`/Verbindungsfehler zu Supabase | Pooler-URL (Port `6543`) verwenden |

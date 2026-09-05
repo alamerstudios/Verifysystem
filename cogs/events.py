@@ -52,6 +52,7 @@ class EventsCog(commands.Cog):
         if cfg.get("panel_channel_id") == channel.id:
             updates["panel_channel_id"] = None
             updates["panel_message_id"] = None
+            updates["panel_message_channel_id"] = None
         if cfg.get("requests_channel_id") == channel.id:
             updates["requests_channel_id"] = None
         if updates:

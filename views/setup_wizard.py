@@ -451,10 +451,19 @@ class FormManagerView(discord.ui.View):
         back.callback = self._on_back  # type: ignore[assignment]
         self.add_item(back)
 
+        switch = discord.ui.Button(label="Zu den Checkboxen",
+                                   style=discord.ButtonStyle.secondary, emoji="☑️", row=2)
+        switch.callback = self._on_switch  # type: ignore[assignment]
+        self.add_item(switch)
+
     async def refresh(self, interaction: discord.Interaction) -> None:
         await self.load()
         self.rebuild()
         await self.parent.edit(interaction, content=None, embed=self.build_embed(), view=self)
+
+    async def _on_switch(self, interaction: discord.Interaction) -> None:
+        self.stop()
+        await CheckboxManagerView(self.parent).refresh(interaction)
 
     # ------------------------------------------------------------ callbacks --
     async def _on_select(self, interaction: discord.Interaction) -> None:
@@ -561,10 +570,19 @@ class CheckboxManagerView(discord.ui.View):
         back.callback = self._on_back  # type: ignore[assignment]
         self.add_item(back)
 
+        switch = discord.ui.Button(label="Zum Formular",
+                                   style=discord.ButtonStyle.secondary, emoji="📝", row=2)
+        switch.callback = self._on_switch  # type: ignore[assignment]
+        self.add_item(switch)
+
     async def refresh(self, interaction: discord.Interaction) -> None:
         await self.load()
         self.rebuild()
         await self.parent.edit(interaction, content=None, embed=self.build_embed(), view=self)
+
+    async def _on_switch(self, interaction: discord.Interaction) -> None:
+        self.stop()
+        await FormManagerView(self.parent).refresh(interaction)
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         self.selected = int(interaction.data["values"][0])  # type: ignore[index]
@@ -672,7 +690,9 @@ class SetupPanelView(BaseSetupView):
             description=(
                 "Das Setup ist **abgeschlossen**. Hier kannst du alles einzeln ändern:\n"
                 "wähle oben einen Bereich aus oder nutze die Buttons für Embed, "
-                "Formular und Checkboxen."
+                "Formular und Checkboxen.\n\n"
+                "🚀 **Embed senden** postet die Verify-Nachricht – ist sie schon da, "
+                "wird sie einfach **aktualisiert**."
             ),
             color=discord.Color.green() if cfg.get("setup_completed") else discord.Color.orange(),
         )
@@ -799,8 +819,7 @@ class SetupPanelView(BaseSetupView):
         self.add_item(b_dm)
 
         b_send = discord.ui.Button(
-            label="Embed (neu) senden", style=discord.ButtonStyle.success, emoji="🚀", row=3,
-            disabled=not self.cfg.get("panel_channel_id"),
+            label="Embed senden", style=discord.ButtonStyle.success, emoji="🚀", row=3,
         )
         b_send.callback = self.do_send_panel  # type: ignore[assignment]
         self.add_item(b_send)

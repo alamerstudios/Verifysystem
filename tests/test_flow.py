@@ -52,7 +52,8 @@ class FakeDB:
             "button_label": config.DEFAULT_BUTTON_LABEL,
             "button_emoji": config.DEFAULT_BUTTON_EMOJI, "button_style": "success",
             "application_enabled": False, "auto_approve": False, "dm_user": True,
-            "panel_message_id": None, "setup_completed": False,
+            "panel_message_id": None, "panel_message_channel_id": None,
+            "setup_completed": False,
         })
 
     async def update_config(self, gid, **values):
@@ -200,10 +201,11 @@ class FakeChannel:
 
 
 class FakeMessage:
-    def __init__(self, mid, channel, embed=None, view=None):
+    def __init__(self, mid, channel, embed=None, view=None, author_id=999):
         self.id, self.channel = mid, channel
         self.embeds = [embed] if embed else []
         self.view = view
+        self.author = SimpleNamespace(id=author_id)
         self.jump_url = f"https://discord.com/{mid}"
 
     async def edit(self, **kw):
@@ -304,6 +306,7 @@ class FakeFollowup:
 class FakeInteraction:
     def __init__(self, user, guild, client, message=None, data=None):
         self.user, self.guild, self.client = user, guild, client
+        self.guild_id = guild.id if guild else None
         self.message, self.data = message, data or {}
         self.response = FakeResponse(self)
         self.followup = FakeFollowup(self)
@@ -323,6 +326,10 @@ discord.Member = FakeMember          # type: ignore[misc,assignment]
 discord.TextChannel = FakeChannel    # type: ignore[misc,assignment]
 discord.Thread = FakeChannel         # type: ignore[misc,assignment]
 discord.ForumChannel = FakeChannel   # type: ignore[misc,assignment]
+
+
+async def cancel_flow(view, user, guild, bot):
+    await view.on_cancel(FakeInteraction(user, guild, bot))
 
 
 def button(view, label_part):
@@ -451,7 +458,7 @@ async def main() -> None:
     await panel_view.start(ia)
     labels = [getattr(c, "label", None) for c in panel_view.children]
     assert "Formular bearbeiten" in labels and "Checkboxen bearbeiten" in labels
-    assert "Embed (neu) senden" in labels and "Setup neu durchlaufen" in labels
+    assert "Embed senden" in labels and "Setup neu durchlaufen" in labels
     print("✔ Verwaltungs-Menü:", [x for x in labels if x])
 
     # Formular aus dem Verwaltungs-Menü bearbeiten
@@ -469,8 +476,16 @@ async def main() -> None:
     em.f_style._value, em.f_required._value, em.f_max._value = "kurz", "ja", ""
     await em.on_submit(FakeInteraction(admin, guild, bot))
     assert (await bot.db.get_form_fields(guild.id))[0]["label"] == "Wie alt bist du genau?"
-    await button(fm2, "Zurück").callback(FakeInteraction(admin, guild, bot))
-    print("✔ Formular über Verwaltungs-Menü bearbeitet")
+    # direkt zu den Checkboxen wechseln und wieder zurück
+    ia3 = FakeInteraction(admin, guild, bot)
+    await button(fm2, "Zu den Checkboxen").callback(ia3)
+    cm2 = ia3.last_view
+    assert isinstance(cm2, CheckboxManagerView) and len(cm2.boxes) == 2
+    ia4 = FakeInteraction(admin, guild, bot)
+    await button(cm2, "Zum Formular").callback(ia4)
+    assert isinstance(ia4.last_view, FormManagerView)
+    await button(ia4.last_view, "Zurück").callback(FakeInteraction(admin, guild, bot))
+    print("✔ Formular über Verwaltungs-Menü bearbeitet + Wechsel zu Checkboxen")
 
     # Bereich (Rollen) über das Dropdown ändern
     section = SectionEditView(panel_view, "add_role_ids")
@@ -488,19 +503,34 @@ async def main() -> None:
     assert (await bot.get_cfg(guild.id))["dm_user"] is True
     print("✔ Schalter im Verwaltungs-Menü funktionieren")
 
-    # Erneut senden -> alte Nachricht wird ersetzt
+    # Erneut senden -> vorhandenes Embed wird BEARBEITET, nicht neu gepostet
     before = len(panel_channel.messages)
+    old_msg_id = panel_channel.messages[-1].id
+    await panel_view.save(embed_title="Aktualisierter Titel")
     ia = FakeInteraction(admin, guild, bot)
-    await button(panel_view, "Embed (neu) senden").callback(ia)
-    assert len(panel_channel.messages) == before, "alte Panel-Nachricht nicht ersetzt"
-    assert any("gesendet" in s for s in ia.sent), ia.sent
+    await button(panel_view, "Embed senden").callback(ia)
+    assert len(panel_channel.messages) == before, "es wurde neu gepostet statt bearbeitet"
     panel_msg = panel_channel.messages[-1]
-    print("✔ Panel neu gesendet & altes ersetzt")
+    assert panel_msg.id == old_msg_id, "Nachricht wurde ersetzt statt bearbeitet"
+    assert panel_msg.embeds[0].title == "Aktualisierter Titel"
+    assert any("aktualisiert" in s for s in ia.sent), ia.sent
+    print("✔ Vorhandenes Embed wurde bearbeitet statt neu gesendet")
+
+    # Kanal wechseln -> altes Embed wird geloescht, neues gepostet
+    await panel_view.save(panel_channel_id=201)
+    ia = FakeInteraction(admin, guild, bot)
+    await button(panel_view, "Embed senden").callback(ia)
+    assert old_msg_id not in [m.id for m in panel_channel.messages], "altes Embed blieb liegen"
+    print("✔ Kanalwechsel: altes Embed entfernt, neues gesendet")
+    await panel_view.save(panel_channel_id=200)
+    ia = FakeInteraction(admin, guild, bot)
+    await button(panel_view, "Embed senden").callback(ia)
+    panel_msg = panel_channel.messages[-1]
 
     # Fehlerfall: Kanal gelöscht -> klare Rückmeldung statt Stille
     await bot.update_cfg(guild.id, panel_channel_id=99999)
     ia = FakeInteraction(admin, guild, bot)
-    await button(panel_view, "Embed (neu) senden").callback(ia)
+    await button(panel_view, "Embed senden").callback(ia)
     assert any("finde ich nicht mehr" in s for s in ia.sent), ia.sent
     print("✔ Fehlerfall meldet sich:", [s for s in ia.sent if "❌" in s][0][:70], "…")
     await bot.update_cfg(guild.id, panel_channel_id=200, panel_message_id=panel_msg.id)
@@ -583,6 +613,22 @@ async def main() -> None:
     ia_twice = FakeInteraction(admin, guild, bot, message=req_msg2)
     await req_msg2.view.children[0].callback(ia_twice) if req_msg2.view else None
     print("✔ Bereits bearbeitete Anfrage abgefangen")
+
+    # --- Checkbox erst nach dem Öffnen des Formulars angelegt (Cache veraltet) ---
+    user5 = FakeMember(1234, guild, roles=[guild.roles[12]], admin=False)
+    guild.members[1234] = user5
+    bot.cache[guild.id]["checkboxes"] = []          # Cache absichtlich veralten lassen
+    ia = FakeInteraction(user5, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia)
+    modal = ia.response.modal
+    modal.inputs[0]._value = "20"
+    ia_sub = FakeInteraction(user5, guild, bot)
+    await modal.on_submit(ia_sub)
+    assert isinstance(ia_sub.last_view, V.CheckboxView), \
+        "Checkboxen fehlen, obwohl sie in der DB stehen"
+    print("✔ Checkboxen werden auch bei veraltetem Cache angezeigt")
+    await cancel_flow(ia_sub.last_view, user5, guild, bot)
+    await bot.load_guild(guild.id)
 
     # --- Ohne Formular/Checkboxen: direkte Anfrage ---
     for f in await bot.db.get_form_fields(guild.id):
