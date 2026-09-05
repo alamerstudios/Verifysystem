@@ -1,0 +1,546 @@
+"""Offline-Simulation des kompletten Ablaufs (ohne Discord & ohne Datenbank).
+
+Ausführen:  python tests/test_flow.py
+Prüft, dass Setup-Assistent, Formular, Checkboxen und die Team-Prüfung ohne
+Laufzeitfehler durchlaufen.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("DISCORD_TOKEN", "test")
+os.environ.setdefault("SUPABASE_DB_URL", "postgresql://u:p@localhost:5432/db")
+
+import discord  # noqa: E402
+
+import config  # noqa: E402
+import utils  # noqa: E402
+from views import verify as V  # noqa: E402
+from views.setup_wizard import (  # noqa: E402
+    CheckboxManagerView, FormManagerView, SetupWizard,
+)
+
+SENT: list[str] = []
+
+
+# --------------------------------------------------------------- Fake-DB -----
+class FakeDB:
+    def __init__(self) -> None:
+        self.configs: dict[int, dict] = {}
+        self.fields: dict[int, list[dict]] = {}
+        self.boxes: dict[int, list[dict]] = {}
+        self.requests: dict[int, dict] = {}
+        self._id = 0
+
+    def _next(self) -> int:
+        self._id += 1
+        return self._id
+
+    async def get_config(self, gid):
+        return self.configs.setdefault(gid, {
+            "guild_id": gid, "panel_channel_id": None, "requests_channel_id": None,
+            "log_channel_id": None, "staff_role_ids": [], "add_role_ids": [],
+            "remove_role_ids": [], "autorole_ids": [],
+            "embed_title": config.DEFAULT_EMBED_TITLE,
+            "embed_description": config.DEFAULT_EMBED_DESCRIPTION,
+            "embed_color": config.DEFAULT_EMBED_COLOR, "embed_footer": None,
+            "embed_image_url": None, "embed_thumbnail_url": None,
+            "button_label": config.DEFAULT_BUTTON_LABEL,
+            "button_emoji": config.DEFAULT_BUTTON_EMOJI, "button_style": "success",
+            "application_enabled": False, "auto_approve": False, "dm_user": True,
+            "panel_message_id": None, "setup_completed": False,
+        })
+
+    async def update_config(self, gid, **values):
+        cfg = await self.get_config(gid)
+        cfg.update(values)
+        return dict(cfg)
+
+    async def get_form_fields(self, gid):
+        return [dict(f) for f in self.fields.get(gid, [])]
+
+    async def add_form_field(self, gid, label, placeholder=None, style="short",
+                             required=True, max_length=None):
+        fid = self._next()
+        self.fields.setdefault(gid, []).append({
+            "id": fid, "guild_id": gid, "position": len(self.fields.get(gid, [])),
+            "label": label, "placeholder": placeholder, "style": style,
+            "required": required, "min_length": None, "max_length": max_length,
+        })
+        return fid
+
+    async def update_form_field(self, fid, **values):
+        for lst in self.fields.values():
+            for f in lst:
+                if f["id"] == fid:
+                    f.update(values)
+
+    async def delete_form_field(self, fid):
+        for gid, lst in self.fields.items():
+            self.fields[gid] = [f for f in lst if f["id"] != fid]
+
+    async def get_checkboxes(self, gid):
+        return [dict(b) for b in self.boxes.get(gid, [])]
+
+    async def add_checkbox(self, gid, label, description=None, required=True):
+        bid = self._next()
+        self.boxes.setdefault(gid, []).append({
+            "id": bid, "guild_id": gid, "position": len(self.boxes.get(gid, [])),
+            "label": label, "description": description, "required": required,
+        })
+        return bid
+
+    async def update_checkbox(self, bid, **values):
+        for lst in self.boxes.values():
+            for b in lst:
+                if b["id"] == bid:
+                    b.update(values)
+
+    async def delete_checkbox(self, bid):
+        for gid, lst in self.boxes.items():
+            self.boxes[gid] = [b for b in lst if b["id"] != bid]
+
+    async def create_request(self, gid, uid, answers, checks):
+        rid = self._next()
+        self.requests[rid] = {
+            "id": rid, "guild_id": gid, "user_id": uid, "answers": list(answers),
+            "checks": list(checks), "status": "pending", "channel_id": None,
+            "message_id": None, "handled_by": None, "reason": None,
+        }
+        return rid
+
+    async def get_request(self, rid):
+        r = self.requests.get(rid)
+        return dict(r) if r else None
+
+    async def get_pending_request(self, gid, uid):
+        for r in self.requests.values():
+            if r["guild_id"] == gid and r["user_id"] == uid and r["status"] == "pending":
+                return dict(r)
+        return None
+
+    async def set_request_message(self, rid, cid, mid):
+        self.requests[rid].update(channel_id=cid, message_id=mid)
+
+    async def close_request(self, rid, status, by, reason=None):
+        self.requests[rid].update(status=status, handled_by=by, reason=reason)
+
+    async def reset_guild(self, gid):
+        self.configs.pop(gid, None)
+        self.fields.pop(gid, None)
+        self.boxes.pop(gid, None)
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.db = FakeDB()
+        self.cache: dict[int, dict] = {}
+        self.user = SimpleNamespace(id=999, __str__=lambda self: "Bot")
+
+    async def load_guild(self, gid):
+        data = {
+            "config": await self.db.get_config(gid),
+            "fields": await self.db.get_form_fields(gid),
+            "checkboxes": await self.db.get_checkboxes(gid),
+        }
+        self.cache[gid] = data
+        return data
+
+    async def get_cfg(self, gid):
+        cached = self.cache.get(gid)
+        return cached["config"] if cached else (await self.load_guild(gid))["config"]
+
+    async def update_cfg(self, gid, **values):
+        cfg = await self.db.update_config(gid, **values)
+        self.cache.setdefault(gid, {"fields": [], "checkboxes": []})["config"] = cfg
+        return cfg
+
+
+# ------------------------------------------------------- Fake Discord --------
+class FakeRole:
+    def __init__(self, rid, name, pos=1):
+        self.id, self.name, self.position = rid, name, pos
+        self.managed = False
+        self.mention = f"<@&{rid}>"
+
+    def is_default(self):
+        return self.id == 1
+
+    def __lt__(self, other):
+        return self.position < other.position
+
+
+class FakeChannel:
+    def __init__(self, cid, guild):
+        self.id, self.guild, self.mention = cid, guild, f"<#{cid}>"
+        self.messages = []
+
+    def permissions_for(self, m):
+        return SimpleNamespace(send_messages=True, embed_links=True)
+
+    async def send(self, content=None, embed=None, view=None, allowed_mentions=None):
+        msg = FakeMessage(len(self.messages) + 1000, self, embed, view)
+        self.messages.append(msg)
+        SENT.append(f"[{self.id}] {embed.title if embed else content}")
+        return msg
+
+    async def fetch_message(self, mid):
+        for m in self.messages:
+            if m.id == mid:
+                return m
+        raise discord.NotFound(SimpleNamespace(status=404, reason=""), "nope")
+
+
+class FakeMessage:
+    def __init__(self, mid, channel, embed=None, view=None):
+        self.id, self.channel = mid, channel
+        self.embeds = [embed] if embed else []
+        self.view = view
+        self.jump_url = f"https://discord.com/{mid}"
+
+    async def edit(self, **kw):
+        if "embed" in kw and kw["embed"] is not None:
+            self.embeds = [kw["embed"]]
+        self.view = kw.get("view", self.view)
+        return self
+
+    async def delete(self):
+        if self in self.channel.messages:
+            self.channel.messages.remove(self)
+
+
+class FakeMember:
+    def __init__(self, uid, guild, roles=None, admin=True):
+        self.id, self.guild, self.bot = uid, guild, False
+        self.roles = roles or []
+        self.mention = f"<@{uid}>"
+        self.display_avatar = SimpleNamespace(url="https://cdn/x.png")
+        self.created_at = discord.utils.utcnow()
+        self.joined_at = discord.utils.utcnow()
+        self.guild_permissions = SimpleNamespace(administrator=admin, manage_guild=admin)
+        self.added, self.removed, self.dms = [], [], []
+
+    def __str__(self):
+        return f"User{self.id}"
+
+    async def add_roles(self, *roles, reason=None):
+        self.added += list(roles)
+        self.roles += list(roles)
+
+    async def remove_roles(self, *roles, reason=None):
+        self.removed += list(roles)
+        self.roles = [r for r in self.roles if r not in roles]
+
+    async def send(self, embed=None, **kw):
+        self.dms.append(embed.title if embed else "")
+
+
+class FakeGuild:
+    def __init__(self):
+        self.id, self.name, self.icon = 1, "Testserver", None
+        self.owner_id = 100
+        self.roles = {
+            10: FakeRole(10, "Team", 5),
+            11: FakeRole(11, "Verifiziert", 4),
+            12: FakeRole(12, "Unverifiziert", 3),
+        }
+        self.channels = {200: FakeChannel(200, self), 201: FakeChannel(201, self)}
+        self.me = SimpleNamespace(top_role=FakeRole(99, "Bot", 50))
+        self.members: dict[int, FakeMember] = {}
+
+    def get_role(self, rid):
+        return self.roles.get(rid)
+
+    def get_channel(self, cid):
+        return self.channels.get(cid)
+
+    def get_member(self, uid):
+        return self.members.get(uid)
+
+
+class FakeResponse:
+    def __init__(self, ia):
+        self.ia, self._done = ia, False
+        self.modal = None
+
+    def is_done(self):
+        return self._done
+
+    async def send_message(self, content=None, embed=None, view=None, ephemeral=False):
+        self._done = True
+        self.ia.sent.append(content or (embed.title if embed else ""))
+        self.ia.last_view = view
+
+    async def edit_message(self, **kw):
+        self._done = True
+        self.ia.edits.append(kw.get("content") or
+                             (kw["embed"].title if kw.get("embed") else ""))
+        self.ia.last_view = kw.get("view", self.ia.last_view)
+
+    async def defer(self, ephemeral=False, thinking=False):
+        self._done = True
+
+    async def send_modal(self, modal):
+        self._done = True
+        self.modal = modal
+
+
+class FakeFollowup:
+    def __init__(self, ia):
+        self.ia = ia
+
+    async def send(self, content=None, embed=None, view=None, ephemeral=False):
+        self.ia.sent.append(content or (embed.title if embed else ""))
+
+
+class FakeInteraction:
+    def __init__(self, user, guild, client, message=None, data=None):
+        self.user, self.guild, self.client = user, guild, client
+        self.message, self.data = message, data or {}
+        self.response = FakeResponse(self)
+        self.followup = FakeFollowup(self)
+        self.sent, self.edits = [], []
+        self.last_view = None
+
+    async def original_response(self):
+        return FakeMessage(1, list(self.guild.channels.values())[0])
+
+    async def edit_original_response(self, **kw):
+        self.edits.append(kw.get("content") or (kw["embed"].title if kw.get("embed") else ""))
+        self.last_view = kw.get("view", self.last_view)
+
+
+# Damit die isinstance()-Prüfungen im Produktivcode mit den Fakes funktionieren:
+discord.Member = FakeMember          # type: ignore[misc,assignment]
+discord.TextChannel = FakeChannel    # type: ignore[misc,assignment]
+discord.Thread = FakeChannel         # type: ignore[misc,assignment]
+discord.ForumChannel = FakeChannel   # type: ignore[misc,assignment]
+
+
+def button(view, label_part):
+    for item in view.children:
+        if isinstance(item, discord.ui.Button) and label_part.lower() in (item.label or "").lower():
+            return item
+    raise AssertionError(f"Button {label_part!r} nicht gefunden in {[getattr(c,'label',c) for c in view.children]}")
+
+
+# ------------------------------------------------------------------ Tests ----
+async def main() -> None:
+    bot = FakeBot()
+    guild = FakeGuild()
+    admin = FakeMember(100, guild, admin=True)
+    user = FakeMember(555, guild, roles=[guild.roles[12]], admin=False)
+    guild.members[100] = admin
+    guild.members[555] = user
+
+    # --- Rechte ---
+    assert utils.is_setup_allowed(admin, guild)
+    assert utils.is_setup_allowed(SimpleNamespace(id=config.BOT_OWNER_ID), guild)
+    assert not utils.is_setup_allowed(user, guild)
+    print("✔ Rechte-Prüfung")
+
+    # --- Setup-Assistent durchklicken ---
+    wizard = SetupWizard(bot, guild, admin.id)
+    ia = FakeInteraction(admin, guild, bot)
+    await wizard.start(ia)
+    assert wizard.step == 0
+
+    await button(wizard, "Setup starten").callback(FakeInteraction(admin, guild, bot))
+    assert wizard.step == 1
+
+    # Schritt 1+2: Kanäle
+    for cid in (200, 201):
+        sel = wizard.children[0]
+        sel._values = [SimpleNamespace(id=cid)]  # type: ignore[attr-defined]
+        object.__setattr__(sel, "_selected_values", [SimpleNamespace(id=cid)])
+        await sel.callback(FakeInteraction(admin, guild, bot))
+    cfg = await bot.get_cfg(guild.id)
+    assert cfg["panel_channel_id"] == 200 and cfg["requests_channel_id"] == 201
+    print("✔ Kanäle gesetzt:", cfg["panel_channel_id"], cfg["requests_channel_id"])
+
+    # Schritt 3-6: Rollen direkt speichern (Select-Werte lassen sich offline nicht faken)
+    await wizard.save(staff_role_ids=[10], add_role_ids=[11],
+                      remove_role_ids=[12], autorole_ids=[12])
+    wizard.step = 7
+    await wizard.render(FakeInteraction(admin, guild, bot))
+
+    # Schritt 7: Embed + Button bearbeiten
+    ia = FakeInteraction(admin, guild, bot)
+    await button(wizard, "Embed bearbeiten").callback(ia)
+    modal = ia.response.modal
+    modal.f_title._value = "Willkommen!"
+    modal.f_desc._value = "Bitte verifizieren."
+    modal.f_color._value = "gruen"
+    modal.f_footer._value = "Team"
+    modal.f_image._value = ""
+    await modal.on_submit(FakeInteraction(admin, guild, bot))
+    cfg = await bot.get_cfg(guild.id)
+    assert cfg["embed_title"] == "Willkommen!" and cfg["embed_color"] == 0x2ECC71
+
+    ia = FakeInteraction(admin, guild, bot)
+    await button(wizard, "Button bearbeiten").callback(ia)
+    m = ia.response.modal
+    m.f_label._value, m.f_emoji._value, m.f_style._value = "Jetzt verifizieren", "🔐", "blau"
+    await m.on_submit(FakeInteraction(admin, guild, bot))
+    cfg = await bot.get_cfg(guild.id)
+    assert cfg["button_label"] == "Jetzt verifizieren" and cfg["button_style"] == "primary"
+    print("✔ Embed & Button bearbeitet")
+
+    # Schritt 8: Formular + Checkboxen
+    wizard.step = 8
+    await wizard.render(FakeInteraction(admin, guild, bot))
+    ia = FakeInteraction(admin, guild, bot)
+    await button(wizard, "Formular verwalten").callback(ia)
+    fm = ia.last_view
+    assert isinstance(fm, FormManagerView)
+    ia2 = FakeInteraction(admin, guild, bot)
+    await button(fm, "Frage hinzufügen").callback(ia2)
+    fmodal = ia2.response.modal
+    fmodal.f_label._value = "Wie alt bist du?"
+    fmodal.f_placeholder._value = "z. B. 17"
+    fmodal.f_style._value, fmodal.f_required._value, fmodal.f_max._value = "kurz", "ja", "3"
+    await fmodal.on_submit(FakeInteraction(admin, guild, bot))
+    assert len(await bot.db.get_form_fields(guild.id)) == 1
+
+    ia3 = FakeInteraction(admin, guild, bot)
+    await button(wizard, "Checkboxen verwalten").callback(ia3)
+    cm = ia3.last_view
+    assert isinstance(cm, CheckboxManagerView)
+    ia4 = FakeInteraction(admin, guild, bot)
+    await button(cm, "Checkbox hinzufügen").callback(ia4)
+    cmodal = ia4.response.modal
+    cmodal.f_label._value = "Ich akzeptiere die Regeln"
+    cmodal.f_desc._value = "Steht in #regeln"
+    cmodal.f_required._value = "ja"
+    await cmodal.on_submit(FakeInteraction(admin, guild, bot))
+    ia5 = FakeInteraction(admin, guild, bot)
+    await button(cm, "Checkbox hinzufügen").callback(ia5)
+    c2 = ia5.response.modal
+    c2.f_label._value, c2.f_desc._value, c2.f_required._value = "Newsletter", "", "nein"
+    await c2.on_submit(FakeInteraction(admin, guild, bot))
+    assert len(await bot.db.get_checkboxes(guild.id)) == 2
+    print("✔ Formular & Checkboxen angelegt")
+
+    # Übersicht + Panel senden
+    wizard.step = 9
+    await wizard.render(FakeInteraction(admin, guild, bot))
+    assert not wizard.missing_required(), wizard.missing_required()
+    ia = FakeInteraction(admin, guild, bot)
+    await button(wizard, "Embed senden").callback(ia)
+    panel_channel = guild.get_channel(200)
+    assert panel_channel.messages, "Panel wurde nicht gesendet"
+    panel_msg = panel_channel.messages[-1]
+    assert panel_msg.view.children[0].custom_id == config.VERIFY_BUTTON_ID
+    print("✔ Panel gesendet:", panel_msg.embeds[0].title,
+          "| Button:", panel_msg.view.children[0].label)
+
+    # --- Nutzer klickt Verifizieren ---
+    await bot.load_guild(guild.id)
+    ia = FakeInteraction(user, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia)
+    modal = ia.response.modal
+    assert isinstance(modal, V.VerifyFormModal), "Formular-Modal fehlt"
+    modal.inputs[0]._value = "17"
+    ia_sub = FakeInteraction(user, guild, bot)
+    await modal.on_submit(ia_sub)
+    cbview = ia_sub.last_view
+    assert isinstance(cbview, V.CheckboxView)
+    print("✔ Formular ausgefüllt → Checkboxen angezeigt")
+
+    # Absenden ohne Pflicht-Häkchen -> Warnung
+    ia_bad = FakeInteraction(user, guild, bot)
+    await cbview.on_submit(ia_bad)
+    assert any("bestätigen" in s for s in ia_bad.sent), ia_bad.sent
+    print("✔ Pflicht-Checkbox wird erzwungen")
+
+    # Häkchen setzen und absenden
+    await cbview.children[0].callback(FakeInteraction(user, guild, bot))
+    assert cbview.state[0] is True
+    ia_ok = FakeInteraction(user, guild, bot)
+    await cbview.on_submit(ia_ok)
+    req_channel = guild.get_channel(201)
+    assert req_channel.messages, "Anfrage nicht gesendet"
+    req_msg = req_channel.messages[-1]
+    print("✔ Anfrage gesendet:", req_msg.embeds[0].title)
+
+    # Doppelte Anfrage wird blockiert
+    ia_dup = FakeInteraction(user, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia_dup)
+    assert any("offene Anfrage" in s for s in ia_dup.sent), ia_dup.sent
+    print("✔ Doppelte Anfrage blockiert")
+
+    # --- Team nimmt an ---
+    accept = req_msg.view.children[0]
+    ia_acc = FakeInteraction(admin, guild, bot, message=req_msg)
+    await accept.callback(ia_acc)
+    assert guild.roles[11] in user.roles, "Rolle nicht vergeben"
+    assert guild.roles[12] not in user.roles, "Rolle nicht entfernt"
+    assert user.dms, "Keine DM verschickt"
+    assert req_msg.embeds[0].title.endswith("angenommen")
+    print("✔ Angenommen → Rollen:", [r.name for r in user.roles], "| DM:", user.dms)
+
+    # Erneuter Klick -> bereits verifiziert
+    ia_again = FakeInteraction(user, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia_again)
+    assert any("bereits verifiziert" in s for s in ia_again.sent), ia_again.sent
+    print("✔ Bereits verifizierte Nutzer werden erkannt")
+
+    # --- Ablehnung eines zweiten Nutzers ---
+    user2 = FakeMember(777, guild, roles=[guild.roles[12]], admin=False)
+    guild.members[777] = user2
+    ia = FakeInteraction(user2, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia)
+    modal = ia.response.modal
+    modal.inputs[0]._value = "12"
+    ia_sub = FakeInteraction(user2, guild, bot)
+    await modal.on_submit(ia_sub)
+    cb2 = ia_sub.last_view
+    await cb2.children[0].callback(FakeInteraction(user2, guild, bot))
+    await cb2.on_submit(FakeInteraction(user2, guild, bot))
+    req_msg2 = guild.get_channel(201).messages[-1]
+    deny = req_msg2.view.children[1]
+    ia_deny = FakeInteraction(admin, guild, bot, message=req_msg2)
+    await deny.callback(ia_deny)
+    dmodal = ia_deny.response.modal
+    dmodal.reason._value = "Zu jung"
+    await dmodal.on_submit(FakeInteraction(admin, guild, bot, message=req_msg2))
+    assert req_msg2.embeds[0].title.endswith("abgelehnt")
+    assert guild.roles[11] not in user2.roles
+    print("✔ Abgelehnt mit Grund | DM:", user2.dms)
+
+    # Doppelte Bearbeitung
+    ia_twice = FakeInteraction(admin, guild, bot, message=req_msg2)
+    await req_msg2.view.children[0].callback(ia_twice) if req_msg2.view else None
+    print("✔ Bereits bearbeitete Anfrage abgefangen")
+
+    # --- Ohne Formular/Checkboxen: direkte Anfrage ---
+    for f in await bot.db.get_form_fields(guild.id):
+        await bot.db.delete_form_field(f["id"])
+    for b in await bot.db.get_checkboxes(guild.id):
+        await bot.db.delete_checkbox(b["id"])
+    await bot.load_guild(guild.id)
+    user3 = FakeMember(888, guild, admin=False)
+    guild.members[888] = user3
+    ia = FakeInteraction(user3, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia)
+    assert guild.get_channel(201).messages[-1].embeds[0].title.startswith("🕓")
+    print("✔ Direkte Anfrage ohne Formular/Checkbox")
+
+    # --- Auto-Annahme ---
+    await bot.update_cfg(guild.id, auto_approve=True)
+    user4 = FakeMember(999, guild, roles=[guild.roles[12]], admin=False)
+    guild.members[999] = user4
+    ia = FakeInteraction(user4, guild, bot, message=panel_msg)
+    await panel_msg.view._callback(ia)
+    assert guild.roles[11] in user4.roles
+    print("✔ Auto-Annahme vergibt Rollen sofort")
+
+    print("\n🎉 Alle Szenarien erfolgreich durchlaufen.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

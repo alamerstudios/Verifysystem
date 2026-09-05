@@ -1,0 +1,46 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Empfohlen: Background Worker (läuft dauerhaft, kein Schlafmodus)
+  # ---------------------------------------------------------------------------
+  - type: worker
+    name: verify-bot
+    runtime: python
+    plan: starter
+    region: frankfurt
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: DISCORD_TOKEN
+        sync: false          # im Render-Dashboard eintragen
+      - key: SUPABASE_DB_URL
+        sync: false          # im Render-Dashboard eintragen
+      - key: BOT_OWNER_ID
+        value: "1313187996790427688"
+
+  # ---------------------------------------------------------------------------
+  # Alternative für den KOSTENLOSEN Plan: Web Service.
+  # Der Bot öffnet dann automatisch den von Render vorgegebenen $PORT
+  # (siehe keepalive.py). Zum Wachhalten einen Uptime-Pinger auf die URL setzen.
+  # Zum Nutzen: den Worker-Block oben löschen und hier die Kommentare entfernen.
+  # ---------------------------------------------------------------------------
+  # - type: web
+  #   name: verify-bot
+  #   runtime: python
+  #   plan: free
+  #   region: frankfurt
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: python bot.py
+  #   healthCheckPath: /
+  #   envVars:
+  #     - key: PYTHON_VERSION
+  #       value: "3.11.9"
+  #     - key: DISCORD_TOKEN
+  #       sync: false
+  #     - key: SUPABASE_DB_URL
+  #       sync: false
+  #     - key: BOT_OWNER_ID
+  #       value: "1313187996790427688"
