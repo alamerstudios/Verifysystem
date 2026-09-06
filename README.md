@@ -90,6 +90,7 @@ python bot.py
 | `/verify-config` | Administrator · Owner | Aktuelle Einstellungen anzeigen |
 | `/verify-reset` | Administrator · Owner | Alles zurücksetzen |
 | `/verify <member>` | Team-Rollen · Admins | Nutzer manuell verifizieren |
+| `/admin_set_bot_profile` | Administrator · Owner · Bot-Owner | Bot-Avatar **auf diesem Server**: 1 Server-Icon · 2 Owner-Profilbild · 3 Standard-Icon (+ optional Nickname) |
 | `/sync` | Bot-Owner | Slash-Commands neu syncen |
 
 ## 🧭 `/setup` – zwei Modi

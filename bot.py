@@ -85,6 +85,7 @@ class VerifyBot(commands.Bot):
 
         await self.load_extension("cogs.setup_cog")
         await self.load_extension("cogs.events")
+        await self.load_extension("cogs.admin_cog")
 
         if config.DEV_GUILD_ID:
             guild = discord.Object(id=config.DEV_GUILD_ID)
